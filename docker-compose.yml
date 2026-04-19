@@ -1,0 +1,38 @@
+services:
+  registry:
+    image: registry:2
+    container_name: registry
+    restart: unless-stopped
+    environment:
+      REGISTRY_HTTP_ADDR: 0.0.0.0:5000
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./registry/data:/var/lib/registry
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    environment:
+      DOCKER_API_VERSION: "1.44"
+      REPO_USER: "${REGISTRY_USER:-change_me_user}"
+      REPO_PASS: "${REGISTRY_PASSWORD:-change_me_password}"
+    command: --interval 30 --cleanup --label-enable
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  fastapi-app:
+    build: ./app
+    image: ${LOCAL_IMAGE_NAME:-perpy-fastapi:latest}
+    container_name: fastapi-app
+    restart: unless-stopped
+    environment:
+      APP_NAME: ${APP_NAME:-FastAPI Template}
+      APP_ENV: ${APP_ENV:-dev}
+      APP_VERSION: ${APP_VERSION:-dev}
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+    ports:
+      - "${APP_PORT:-8000}:8000"
