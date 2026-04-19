@@ -1,0 +1,93 @@
+# Пример: сборка образа → GitHub Container Registry → деплой по SSH на сервер.
+#
+# Нужные секреты (Settings → Secrets and variables → Actions):
+#   SSH_HOST          — хост сервера (например 203.0.113.10 или example.com)
+#   SSH_USER          — пользователь SSH
+#   SSH_PRIVATE_KEY   — приватный ключ OpenSSH (содержимое id_rsa / id_ed25519)
+#   (опционально) в шаге SSH добавьте port: 2222, если SSH не на 22 порту
+#   GHCR_USERNAME     — логин для docker login на сервере (обычно GitHub username или org)
+#   GHCR_TOKEN        — Personal Access Token с правом read:packages (для pull с ghcr.io)
+#
+# Для пуша в GHCR из job сборки используется встроенный GITHUB_TOKEN (packages: write).
+
+name: Build, push to GHCR, deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      tag: ${{ steps.meta.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Image name and tag (GHCR — только нижний регистр)
+        id: meta
+        run: |
+          IMAGE="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./app
+          file: ./app/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
+            ${{ steps.meta.outputs.image }}:latest
+          build-args: |
+            BUILD_VERSION=${{ github.sha }}
+            APP_NAME=FastAPI Template
+            APP_ENV=prod
+
+  deploy:
+    name: Deploy via SSH
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pull image and restart container
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+            IMAGE="${{ needs.build-and-push.outputs.image }}"
+            TAG="${{ needs.build-and-push.outputs.tag }}"
+            docker pull "${IMAGE}:${TAG}"
+            # Остановить и удалить старый контейнер (имя подставьте своё)
+            docker rm -f fastapi-app 2>/dev/null || true
+            # Запуск нового контейнера (порты и env — под свои нужды)
+            docker run -d \
+              --name fastapi-app \
+              --restart unless-stopped \
+              -p 8000:8000 \
+              -e APP_VERSION="${TAG}" \
+              -e APP_ENV=prod \
+              "${IMAGE}:${TAG}"
+            docker image prune -f
