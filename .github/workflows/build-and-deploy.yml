@@ -2,7 +2,7 @@
 #
 # Нужные секреты (Settings → Secrets and variables → Actions):
 #   SSH_HOST          — хост сервера (например 203.0.113.10 или example.com)
-#   SSH_USER          — пользователь SSH
+#   SSH_USER или SSH_USERNAME — пользователь SSH (достаточно одного из секретов)
 #   SSH_PRIVATE_KEY   — приватный ключ OpenSSH (содержимое id_rsa / id_ed25519)
 #   (опционально) в шаге SSH добавьте port: 2222, если SSH не на 22 порту
 #   GHCR_USERNAME     — логин для docker login на сервере (обычно GitHub username или org)
@@ -71,9 +71,9 @@ jobs:
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
+          # Поддержка и SSH_USER, и SSH_USERNAME — в репозитории должен быть задан один из них
+          username: ${{ secrets.SSH_USER || secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script_stop: true
           script: |
             set -euo pipefail
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
