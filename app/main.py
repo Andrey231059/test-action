@@ -33,3 +33,19 @@ def health():
         "version": APP_VERSION,
         "time_utc": datetime.now(timezone.utc).isoformat(),
     }
+
+
+@app.get("/date")
+def current_date():
+    now = datetime.now(timezone.utc)
+    return {"date_utc": now.date().isoformat(), "timezone": "UTC"}
+
+
+@app.get("/datetime")
+def current_datetime():
+    now = datetime.now(timezone.utc)
+    return {
+        "datetime_utc": now.isoformat(),
+        "date_utc": now.date().isoformat(),
+        "timezone": "UTC",
+    }
