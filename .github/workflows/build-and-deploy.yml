@@ -5,8 +5,9 @@
 #   SSH_USER / SSH_USERNAME / DEPLOY_USER — логин SSH (достаточно одного секрета)
 #   SSH_PRIVATE_KEY   — приватный ключ OpenSSH (содержимое id_rsa / id_ed25519)
 #   SSH_PORT            — (опционально) порт SSH, по умолчанию 22
-#   GHCR_USERNAME     — логин для docker login на сервере (обычно GitHub username или org)
-#   GHCR_TOKEN        — Personal Access Token с правом read:packages (для pull с ghcr.io)
+#   GHCR_USERNAME + GHCR_TOKEN — для docker login на сервере перед pull (приватный пакет в GHCR).
+#     Если оба не заданы — docker login пропускается (подходит для публичного образа).
+#     Задать только одно из двух нельзя.
 #
 # Для пуша в GHCR из job сборки используется встроенный GITHUB_TOKEN (packages: write).
 
@@ -102,10 +103,29 @@ jobs:
           : "${REMOTE_LOGIN:?remote_login is empty — add SSH_USER, SSH_USERNAME or DEPLOY_USER}"
           : "${SSH_HOST:?SSH_HOST secret is empty}"
           PORT="${SSH_PORT:-22}"
-          # Heredoc с отступами в YAML ломает закрывающий EOF — собираем скрипт и передаём в ssh через pipe
+
+          # Пустой GHCR_USERNAME → ошибка «username is empty» у docker login на сервере, не у SSH.
+          if [ -n "${GHCR_TOKEN:-}" ] && [ -z "${GHCR_USERNAME:-}" ]; then
+            echo "::error::Задан GHCR_TOKEN, но не задан GHCR_USERNAME (GitHub login для docker login)."
+            exit 1
+          fi
+          if [ -n "${GHCR_USERNAME:-}" ] && [ -z "${GHCR_TOKEN:-}" ]; then
+            echo "::error::Задан GHCR_USERNAME, но не задан GHCR_TOKEN (PAT с read:packages)."
+            exit 1
+          fi
+          if [ -n "${GHCR_TOKEN:-}" ] && [ -n "${GHCR_USERNAME:-}" ]; then
+            echo "::notice::На сервере будет выполнен docker login ghcr.io (приватный или ограниченный пакет)."
+            DO_LOGIN=1
+          else
+            echo "::notice::GHCR_TOKEN/GHCR_USERNAME не заданы — docker login пропущен (ожидается публичный образ в GHCR)."
+            DO_LOGIN=0
+          fi
+
           {
             echo 'set -euo pipefail'
-            printf 'echo %q | docker login ghcr.io -u %q --password-stdin\n' "$GHCR_TOKEN" "$GHCR_USERNAME"
+            if [ "$DO_LOGIN" -eq 1 ]; then
+              printf 'echo %q | docker login ghcr.io -u %q --password-stdin\n' "$GHCR_TOKEN" "$GHCR_USERNAME"
+            fi
             printf 'docker pull %q\n' "${IMAGE}:${TAG}"
             echo 'docker rm -f fastapi-app 2>/dev/null || true'
             printf 'docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e APP_VERSION=%q -e APP_ENV=prod %q\n' "$TAG" "${IMAGE}:${TAG}"
