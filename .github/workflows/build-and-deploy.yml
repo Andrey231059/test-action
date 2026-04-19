@@ -67,12 +67,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Логин передаём через env и step output: выражение secrets.A || secrets.B в with: у ssh-action
+      # иногда не подставляется, из‑за чего drone-ssh видит пустой username.
+      - name: Resolve SSH username
+        id: ssh_deploy
+        env:
+          U1: ${{ secrets.SSH_USER }}
+          U2: ${{ secrets.SSH_USERNAME }}
+        run: |
+          USER="${U1:-${U2}}"
+          if [ -z "$USER" ]; then
+            echo "::error::Задайте секрет SSH_USER или SSH_USERNAME (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+          echo "username=${USER}" >> "$GITHUB_OUTPUT"
+
       - name: Pull image and restart container
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.SSH_HOST }}
-          # Поддержка и SSH_USER, и SSH_USERNAME — в репозитории должен быть задан один из них
-          username: ${{ secrets.SSH_USER || secrets.SSH_USERNAME }}
+          username: ${{ steps.ssh_deploy.outputs.username }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             set -euo pipefail
