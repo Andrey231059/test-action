@@ -2,9 +2,9 @@
 #
 # Нужные секреты (Settings → Secrets and variables → Actions):
 #   SSH_HOST          — хост сервера (например 203.0.113.10 или example.com)
-#   SSH_USER или SSH_USERNAME — пользователь SSH (достаточно одного из секретов)
+#   SSH_USER / SSH_USERNAME / DEPLOY_USER — логин SSH (достаточно одного секрета)
 #   SSH_PRIVATE_KEY   — приватный ключ OpenSSH (содержимое id_rsa / id_ed25519)
-#   (опционально) в шаге SSH добавьте port: 2222, если SSH не на 22 порту
+#   SSH_PORT            — (опционально) порт SSH, по умолчанию 22
 #   GHCR_USERNAME     — логин для docker login на сервере (обычно GitHub username или org)
 #   GHCR_TOKEN        — Personal Access Token с правом read:packages (для pull с ghcr.io)
 #
@@ -67,41 +67,47 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Логин передаём через env и step output: выражение secrets.A || secrets.B в with: у ssh-action
-      # иногда не подставляется, из‑за чего drone-ssh видит пустой username.
-      - name: Resolve SSH username
+      # Не используйте имя переменной USER — в GitHub Actions оно уже задано (runner),
+      # из‑за этого логин мог не попадать в appleboy/drone-ssh.
+      - name: Resolve SSH login
         id: ssh_deploy
         env:
           U1: ${{ secrets.SSH_USER }}
           U2: ${{ secrets.SSH_USERNAME }}
+          U3: ${{ secrets.DEPLOY_USER }}
         run: |
-          USER="${U1:-${U2}}"
-          if [ -z "$USER" ]; then
-            echo "::error::Задайте секрет SSH_USER или SSH_USERNAME (Settings → Secrets and variables → Actions)."
+          REMOTE_LOGIN="${U1:-${U2:-${U3}}}"
+          if [ -z "$REMOTE_LOGIN" ]; then
+            echo "::error::Задайте один из секретов: SSH_USER, SSH_USERNAME или DEPLOY_USER (Settings → Secrets and variables → Actions)."
             exit 1
           fi
-          echo "username=${USER}" >> "$GITHUB_OUTPUT"
+          echo "remote_login=${REMOTE_LOGIN}" >> "$GITHUB_OUTPUT"
 
-      - name: Pull image and restart container
-        uses: appleboy/ssh-action@v1.2.2
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ steps.ssh_deploy.outputs.username }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            set -euo pipefail
-            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
-            IMAGE="${{ needs.build-and-push.outputs.image }}"
-            TAG="${{ needs.build-and-push.outputs.tag }}"
-            docker pull "${IMAGE}:${TAG}"
-            # Остановить и удалить старый контейнер (имя подставьте своё)
-            docker rm -f fastapi-app 2>/dev/null || true
-            # Запуск нового контейнера (порты и env — под свои нужды)
-            docker run -d \
-              --name fastapi-app \
-              --restart unless-stopped \
-              -p 8000:8000 \
-              -e APP_VERSION="${TAG}" \
-              -e APP_ENV=prod \
-              "${IMAGE}:${TAG}"
-            docker image prune -f
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Pull image and restart container (SSH)
+        env:
+          REMOTE_LOGIN: ${{ steps.ssh_deploy.outputs.remote_login }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+          TAG: ${{ needs.build-and-push.outputs.tag }}
+        run: |
+          set -euo pipefail
+          : "${REMOTE_LOGIN:?remote_login is empty — add SSH_USER, SSH_USERNAME or DEPLOY_USER}"
+          : "${SSH_HOST:?SSH_HOST secret is empty}"
+          PORT="${SSH_PORT:-22}"
+          # Heredoc с отступами в YAML ломает закрывающий EOF — собираем скрипт и передаём в ssh через pipe
+          {
+            echo 'set -euo pipefail'
+            printf 'echo %q | docker login ghcr.io -u %q --password-stdin\n' "$GHCR_TOKEN" "$GHCR_USERNAME"
+            printf 'docker pull %q\n' "${IMAGE}:${TAG}"
+            echo 'docker rm -f fastapi-app 2>/dev/null || true'
+            printf 'docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e APP_VERSION=%q -e APP_ENV=prod %q\n' "$TAG" "${IMAGE}:${TAG}"
+            echo 'docker image prune -f'
+          } | ssh -o StrictHostKeyChecking=accept-new -p "${PORT}" "${REMOTE_LOGIN}@${SSH_HOST}" bash -s
